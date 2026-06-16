@@ -6,46 +6,19 @@ set -euo pipefail
 #   ./tbb
 #   ./moka
 #   ./quic
-#   ./caffeine-bench
 #
 # Output folder:
-#   ./results_uniform_zipfian_sleep_spin_ALLOFTHEM_<timestamp>/
+#   ./results_uniform_zipfian_sleep_spin_<timestamp>/
 #
 # Output file:
 #   results.csv
 #
-# CPU pinning:
-#   By default, each benchmark process is pinned to 8 cores, cores 0-7.
-#
-#   Choose how many cores to use:
-#     CORE_COUNT=4 ./run_benchmarks_single_csv_taskset.sh
-#
-#   Choose a starting core too:
-#     CORE_START=8 CORE_COUNT=4 ./run_benchmarks_single_csv_taskset.sh
-#
-#   Or override the exact CPU list/range manually:
-#     PIN_CORES=8-15 ./run_benchmarks_single_csv_taskset.sh
-#
-# Benchmark threads are separate from pinned cores. For clean comparisons, keep
-# BENCH_THREADS close to CORE_COUNT unless you intentionally want oversubscription:
-#     CORE_COUNT=4 BENCH_THREADS=4 ./run_benchmarks_single_csv_taskset.sh
+# Edit the arrays and constants below to change what gets benchmarked.
 
 OPS_LIST=(100000)
+THREADS_LIST=(8)
 CACHE_SIZES=(10000)
 TOTAL_KEYS_LIST=(10000 10125 10250 10500 11000 11250 11500 12500 15000 30000 50000)
-
-# Benchmark worker threads passed to each benchmark binary.
-# Override with one value:
-#   BENCH_THREADS=4 ./run_benchmarks_single_csv_taskset.sh
-# Or sweep several values, space-separated:
-#   BENCH_THREADS_LIST="1 2 4 8" ./run_benchmarks_single_csv_taskset.sh
-if [[ -n "${BENCH_THREADS_LIST:-}" ]]; then
-  read -r -a THREADS_LIST <<<"$BENCH_THREADS_LIST"
-elif [[ -n "${BENCH_THREADS:-}" ]]; then
-  THREADS_LIST=("$BENCH_THREADS")
-else
-  THREADS_LIST=(8)
-fi
 
 # Main distributions:
 #   u = uniform
@@ -61,10 +34,10 @@ DELAY_MODES=(sleep)
 THETAS=(0.95)
 THETA_PLACEHOLDER=0.95
 
-# Sleep duration inside mapping on cache miss, in microseconds:
+# Sleep duration inside mapping on cache miss, in microseconds.
 SLEEP_US_LIST=(0 1 10 100)
 
-# Spin duration inside mapping on cache miss, in microseconds:
+# Spin duration inside mapping on cache miss, in microseconds.
 SPIN_US_LIST=(1 10 100)
 
 # Smoke-test parameters. These run before the full benchmark.
@@ -75,47 +48,21 @@ TEST_TOTAL_KEYS=100
 TEST_SLEEP_US=1
 TEST_SPIN_US=1
 
+# CPU pinning for every benchmark process.
+PIN_CORES="0-7"
+TASKSET_BIN="taskset"
+
 ALCAMI_BIN="./alcami/build/tools/benchmark"
 TBB_BIN="./tbb/build/cache_bench_tbb"
 MOKA_DIR="./moka"
 QUIC_DIR="./quic"
-CAFFEINE_DIR="./caffeine-bench"
-CAFFEINE_JAR="$CAFFEINE_DIR/target/caffeine-bench-1.0-SNAPSHOT.jar"
 
-RESULTS_DIR="./results_uniform_zipfian_sleep_spin_ALLOFTHEM_$(date +%Y%m%d_%H%M%S)"
+RESULTS_DIR="./results_uniform_zipfian_sleep_spin_$(date +%Y%m%d_%H%M%S)"
 RESULTS_CSV="$RESULTS_DIR/results.csv"
-
-# Pin each benchmark process with taskset.
-#
-# Simple mode:
-#   CORE_COUNT=4              -> cores 0-3
-#   CORE_START=8 CORE_COUNT=4 -> cores 8-11
-#
-# Exact mode. Takes precedence:
-#   PIN_CORES=0,2,4,6
-#   PIN_CORES=8-15
-CORE_START="${CORE_START:-0}"
-CORE_COUNT="${CORE_COUNT:-8}"
-TASKSET_BIN="${TASKSET_BIN:-taskset}"
-
-if [[ -z "${PIN_CORES:-}" ]]; then
-  if ! [[ "$CORE_START" =~ ^[0-9]+$ && "$CORE_COUNT" =~ ^[0-9]+$ ]]; then
-    echo "CORE_START and CORE_COUNT must be non-negative integers" >&2
-    exit 1
-  fi
-
-  if ((CORE_COUNT < 1)); then
-    echo "CORE_COUNT must be at least 1" >&2
-    exit 1
-  fi
-
-  CORE_END=$((CORE_START + CORE_COUNT - 1))
-  PIN_CORES="$CORE_START-$CORE_END"
-fi
 
 CSV_HEADER="program,ops_per_thread,threads,cache_size,total_keys,distribution,lambda,theta,warmup,mapping_sleep_us,mapping_spin_us,secs,mops,ns_per_op,warmup_misses"
 
-PROGRAMS=(alcami tbb moka quic caffeine)
+PROGRAMS=(alcami tbb moka quic)
 
 distribution_name() {
   local distribution="$1"
@@ -217,21 +164,6 @@ require_command() {
 
 run_pinned() {
   "$TASKSET_BIN" -c "$PIN_CORES" "$@"
-}
-
-ensure_caffeine_jar() {
-  require_path "$CAFFEINE_DIR" dir
-
-  echo "Building caffeine-bench..."
-  (
-    cd "$CAFFEINE_DIR"
-    mvn -q -DskipTests clean package
-  )
-
-  if [[ ! -f "$CAFFEINE_JAR" ]]; then
-    echo "Caffeine jar missing after build: $CAFFEINE_JAR"
-    exit 1
-  fi
 }
 
 append_normalized_csv_line() {
@@ -358,29 +290,6 @@ run_quic_raw() {
   )
 }
 
-run_caffeine_raw() {
-  local ops="$1"
-  local threads="$2"
-  local cache_size="$3"
-  local total_keys="$4"
-  local distribution="$5"
-  local theta="$6"
-  local mapping_sleep_us="$7"
-  local mapping_spin_us="$8"
-
-  run_pinned java -jar "$CAFFEINE_JAR" \
-    --ops "$ops" \
-    --threads "$threads" \
-    --cache_size "$cache_size" \
-    --total_keys "$total_keys" \
-    --distribution "$distribution" \
-    --lambda "0.01" \
-    --theta "$theta" \
-    --mapping_sleep_us "$mapping_sleep_us" \
-    --mapping_spin_us "$mapping_spin_us" \
-    --labeled false
-}
-
 run_program_raw() {
   local program_name="$1"
   local ops="$2"
@@ -404,9 +313,6 @@ run_program_raw() {
     ;;
   quic)
     run_quic_raw "$ops" "$threads" "$cache_size" "$total_keys" "$distribution" "$theta" "$mapping_sleep_us" "$mapping_spin_us"
-    ;;
-  caffeine)
-    run_caffeine_raw "$ops" "$threads" "$cache_size" "$total_keys" "$distribution" "$theta" "$mapping_sleep_us" "$mapping_spin_us"
     ;;
   *)
     echo "unknown program: $program_name"
@@ -561,9 +467,6 @@ run_suite() {
   local program_name="$1"
 
   for distribution in "${DISTRIBUTIONS[@]}"; do
-    local dist_name
-    dist_name="$(distribution_name "$distribution")"
-
     for delay_mode in "${DELAY_MODES[@]}"; do
       if [[ "$distribution" == "z" ]]; then
         for theta in "${THETAS[@]}"; do
@@ -582,7 +485,6 @@ require_path "$ALCAMI_BIN" file
 require_path "$TBB_BIN" file
 require_path "$MOKA_DIR" dir
 require_path "$QUIC_DIR" dir
-ensure_caffeine_jar
 
 mkdir -p "$RESULTS_DIR"
 echo "$CSV_HEADER" >"$RESULTS_CSV"
