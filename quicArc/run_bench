@@ -4,7 +4,12 @@ set -euo pipefail
 
 OUTPUT="results.csv"
 
-THREADS=8
+THREAD_COUNTS=(
+  8
+  26
+  52
+)
+
 OPS=1000000
 CACHE_SIZE=10000
 DISTRIBUTION="z"
@@ -38,34 +43,37 @@ cargo build --release
 # CSV header
 echo "repeat,ops_per_thread,threads,cache_size,total_keys,distribution,lambda,theta,warmup,mapping_sleep_us,mapping_spin_us,secs,mops,ns_per_op,warmup_misses" >"$OUTPUT"
 
-for mapping_sleep_us in "${MAPPING_SLEEP_US[@]}"; do
-  for total_keys in "${TOTAL_KEYS[@]}"; do
-    echo
-    echo "========================================"
-    echo "mapping_sleep_us=$mapping_sleep_us"
-    echo "total_keys=$total_keys"
-    echo "cache_size=$CACHE_SIZE"
-    echo "========================================"
+for threads in "${THREAD_COUNTS[@]}"; do
+  for mapping_sleep_us in "${MAPPING_SLEEP_US[@]}"; do
+    for total_keys in "${TOTAL_KEYS[@]}"; do
+      echo
+      echo "========================================"
+      echo "threads=$threads"
+      echo "mapping_sleep_us=$mapping_sleep_us"
+      echo "total_keys=$total_keys"
+      echo "cache_size=$CACHE_SIZE"
+      echo "========================================"
 
-    for ((repeat = 1; repeat <= REPEATS; repeat++)); do
-      echo "  run $repeat/$REPEATS"
+      for ((repeat = 1; repeat <= REPEATS; repeat++)); do
+        echo "  run $repeat/$REPEATS"
 
-      # Prefix the benchmark's CSV output with the repeat number.
-      printf "%s," "$repeat" >>"$OUTPUT"
+        # Prefix the benchmark's CSV output with the repeat number.
+        printf "%s," "$repeat" >>"$OUTPUT"
 
-      cargo run \
-        --release \
-        --quiet \
-        -- \
-        --threads "$THREADS" \
-        --ops "$OPS" \
-        --cache_size "$CACHE_SIZE" \
-        --total_keys "$total_keys" \
-        --distribution "$DISTRIBUTION" \
-        --theta "$THETA" \
-        --mapping_sleep_us "$mapping_sleep_us" \
-        --labeled false \
-        2>/dev/null >>"$OUTPUT"
+        cargo run \
+          --release \
+          --quiet \
+          -- \
+          --threads "$threads" \
+          --ops "$OPS" \
+          --cache_size "$CACHE_SIZE" \
+          --total_keys "$total_keys" \
+          --distribution "$DISTRIBUTION" \
+          --theta "$THETA" \
+          --mapping_sleep_us "$mapping_sleep_us" \
+          --labeled false \
+          2>/dev/null >>"$OUTPUT"
+      done
     done
   done
 done
