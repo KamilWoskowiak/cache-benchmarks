@@ -1,0 +1,9 @@
+[package]
+name = "quic"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+quick_cache = "0.6"
+rand = "0.9"
+rand_distr = "=0.5.1"
