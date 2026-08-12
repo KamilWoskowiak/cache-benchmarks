@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+
+set -o nounset
+set -o errexit
+set -o pipefail
+
+this_dir="$(dirname "$(realpath "${0}")")" || exit
+
+source "${this_dir}/.common.rc" || exit
+
+# run with no option overrides
+run_configure "${@}"

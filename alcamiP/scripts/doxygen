@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+
+set -o nounset
+set -o errexit
+set -o pipefail
+
+this_dir="$(dirname "$(realpath "${0}")")" || exit
+
+source "${this_dir}/.common.rc" || exit
+
+has_command cmake || exit
+
+is_configured || exit 2
+
+cmake --build "${build_dir}" --target alcami-doxygen "${@}"

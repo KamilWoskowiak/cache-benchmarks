@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+
+set -o nounset
+set -o errexit
+set -o pipefail
+
+this_dir="$(dirname "$(realpath "${0}")")" || exit
+
+source "${this_dir}/.common.rc" || exit
+
+has_command basename || exit
+has_command sed || exit
+
+print_configurations() {
+    local config_scripts; config_scripts="$(ls "${this_dir}"/configure-*)" || return 1
+
+    for file in ${config_scripts}; do
+       basename "$(echo "${file}" | sed -e 's/configure-//')" || return 1
+    done
+}
+
+if (( ${#} < 1 )); then
+    echo "usage: ${0} CONFIGURATION [ARGS...]" >&2
+    echo "configurations:" $(print_configurations) >&2  || exit
+
+    exit 2
+fi
+
+configuration="${1}"
+shift
+
+config_script="${this_dir}/configure-${configuration}"
+
+if [[ ! -f ${config_script} ]]; then
+    echo "error: no file named ${config_script}" >&2
+    echo "please specify one of:" >&2
+    print_configurations >&2 || exit
+
+    exit 2
+fi
+
+"${config_script}" "${@}"

@@ -1,0 +1,22 @@
+# cmake
+CMakeFiles/
+Testing/
+_deps/
+CMakeCache.txt
+
+# local cmake config
+CMakeUserPresets.json
+
+# build generated
+CMakeDoxyfile.in
+CMakeDoxygenDefaults.cmake
+CTestTestfile.cmake
+DartConfiguration.tcl
+compile_commands.json
+
+# workflow generated
+build/
+bin/
+
+# disallowed names
+lib/

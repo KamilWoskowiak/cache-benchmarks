@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+OUTPUT="page_benchmark_results.csv"
+BINARY="./build/tools/page_benchmark"
+
+THREAD_COUNTS=(
+  8
+  26
+  52
+)
+
+MAPPING_SLEEP_US=(
+  0
+  1
+  10
+  100
+)
+
+# Alcami cache_options sweeps.
+APPEND_LOG_CAPACITIES=(
+  32
+  64
+  128
+)
+
+APPEND_LOG_BUFFER_COUNTS=(
+  4
+  8
+  16
+)
+
+EVICTIONS_PER_CYCLE=(
+  8
+  16
+  32
+  48
+)
+
+# Must be powers of two because cache_options takes shard_power,
+# where:
+#
+#   shard_count = 2^shard_power
+#
+SHARD_COUNTS=(
+  0
+  6
+)
+
+OPS=1000000
+CACHE_SIZE=10000
+
+DISTRIBUTION="z"
+THETA=0.95
+
+# Only relevant for exponential distribution, but retained in CSV output.
+LAMBDA=0.01
+
+# Number of repetitions per configuration.
+REPEATS=2
+
+# Working-set sizes to test.
+TOTAL_KEYS=(
+  10000
+  12500
+  15000
+  20000
+  30000
+  50000
+  75000
+)
+
+# Convert a power-of-two shard count to shard_power.
+#
+# Examples:
+#
+#   1  -> 0
+#   2  -> 1
+#   4  -> 2
+#   8  -> 3
+#   16 -> 4
+#
+shard_count_to_power() {
+  local count=$1
+  local power=0
+  local value=$count
+
+  if ((count < 1)); then
+    echo "Error: shard count must be >= 1" >&2
+    return 1
+  fi
+
+  while ((value > 1)); do
+    if ((value % 2 != 0)); then
+      echo "Error: shard count must be a power of two: $count" >&2
+      return 1
+    fi
+
+    value=$((value / 2))
+    power=$((power + 1))
+  done
+
+  echo "$power"
+}
+
+# Make sure the benchmark binary exists.
+if [[ ! -x "$BINARY" ]]; then
+  echo "Error: benchmark binary not found or not executable: $BINARY"
+  exit 1
+fi
+
+# Validate shard counts before starting a long benchmark.
+for shard_count in "${SHARD_COUNTS[@]}"; do
+  shard_power=$(shard_count_to_power "$shard_count")
+
+  if ((shard_count > CACHE_SIZE)); then
+    echo "Error: shard count ($shard_count) exceeds cache size ($CACHE_SIZE)"
+    exit 1
+  fi
+
+  echo "shards=$shard_count -> shard_power=$shard_power"
+done
+
+# CSV output from page_benchmark --labeled false is:
+#
+# ops_per_thread
+# threads
+# cache_size
+# total_keys
+# distribution
+# lambda
+# theta
+# warmup
+# mapping_sleep_us
+# mapping_spin_us
+# append_log_capacity
+# append_log_buffer_count
+# shard_power
+# shard_count
+# evictions_per_cycle
+# secs
+# mops
+# ns_per_op
+# warmup_misses
+# hit_percent
+#
+echo \
+  "repeat,ops_per_thread,threads,cache_size,total_keys,distribution,lambda,theta,warmup,mapping_sleep_us,mapping_spin_us,append_log_capacity,append_log_buffer_count,shard_power,shard_count,evictions_per_cycle,secs,mops,ns_per_op,warmup_misses,hit_percent" \
+  >"$OUTPUT"
+
+for threads in "${THREAD_COUNTS[@]}"; do
+  for mapping_sleep_us in "${MAPPING_SLEEP_US[@]}"; do
+    for total_keys in "${TOTAL_KEYS[@]}"; do
+      for append_log_capacity in "${APPEND_LOG_CAPACITIES[@]}"; do
+        for append_log_buffer_count in "${APPEND_LOG_BUFFER_COUNTS[@]}"; do
+          for evictions_per_cycle in "${EVICTIONS_PER_CYCLE[@]}"; do
+            for shard_count in "${SHARD_COUNTS[@]}"; do
+
+              shard_power=$(shard_count_to_power "$shard_count")
+
+              working_set_mib=$(
+                awk "BEGIN {
+                  printf \"%.2f\", ($total_keys * 16384) / 1048576
+                }"
+              )
+
+              cache_mib=$(
+                awk "BEGIN {
+                  printf \"%.2f\", ($CACHE_SIZE * 16384) / 1048576
+                }"
+              )
+
+              echo
+              echo "========================================"
+              echo "threads=$threads"
+              echo "mapping_sleep_us=$mapping_sleep_us"
+              echo "total_keys=$total_keys"
+              echo "cache_size=$CACHE_SIZE"
+              echo "cache_mib=$cache_mib"
+              echo "working_set_mib=$working_set_mib"
+              echo "append_log_capacity=$append_log_capacity"
+              echo "append_log_buffer_count=$append_log_buffer_count"
+              echo "evictions_per_cycle=$evictions_per_cycle"
+              echo "shard_count=$shard_count"
+              echo "shard_power=$shard_power"
+              echo "========================================"
+
+              for ((repeat = 1; repeat <= REPEATS; repeat++)); do
+                echo "  run $repeat/$REPEATS"
+
+                result=$(
+                  "$BINARY" \
+                    --threads "$threads" \
+                    --ops "$OPS" \
+                    --cache_size "$CACHE_SIZE" \
+                    --total_keys "$total_keys" \
+                    --distribution "$DISTRIBUTION" \
+                    --lambda "$LAMBDA" \
+                    --theta "$THETA" \
+                    --mapping_sleep_us "$mapping_sleep_us" \
+                    --append_log_capacity "$append_log_capacity" \
+                    --append_log_buffer_count "$append_log_buffer_count" \
+                    --shard_power "$shard_power" \
+                    --evictions_per_cycle "$evictions_per_cycle" \
+                    --labeled false \
+                    2>/dev/null
+                )
+
+                echo "$repeat,$result" >>"$OUTPUT"
+              done
+
+            done
+          done
+        done
+      done
+    done
+  done
+done
+
+echo
+echo "Done."
+echo "Results written to: $OUTPUT"

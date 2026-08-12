@@ -1,0 +1,5 @@
+Checks: "-*,boost-*,bugprone-*,clang-analyzer-*,concurrency-*,cppcoreguidelines-*,modernize-*,performance-*,portability-*,-bugprone-easily-swappable-parameters,-portability-template-virtual-member-function"
+CheckOptions:
+  modernize-use-trailing-return-type.TransformLambdas: "none"
+HeaderFilterRegex: '.*'
+ExcludeHeaderFilterRegex: '(.*/include/alcami/config.h|.*/_deps)'

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+set -o nounset
+set -o errexit
+set -o pipefail
+
+this_dir="$(dirname "$(realpath "${0}")")" || exit
+
+source "${this_dir}/.common.rc" || exit
+
+configure_args="-DALCAMI_BUILD_DOXYGEN=1"
+
+# create development build with doxygen target
+"${this_dir}/configure-develop" ${configure_args} "${@}"

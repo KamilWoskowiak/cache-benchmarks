@@ -1,0 +1,26 @@
+this_rc_dir="$(dirname "$(realpath "${BASH_SOURCE[0]}")")" || exit
+root="$(realpath "${this_rc_dir}/..")" || exit
+
+source_dir="${root}"
+build_dir="${root}/build"
+install_dir="${root}/build/install"
+
+has_command() {
+    (( ${#} == 1 )) && command -v "${1}" 1>/dev/null
+}
+
+is_configured() {
+    if [[ ! -d "${build_dir}" ]]; then
+        echo "Directory ${build_dir} does not exist. Try using ${this_rc_dir}/configure"
+        return 1
+    fi
+}
+
+run_configure() {
+    has_command cmake || return
+
+    mkdir -p "${build_dir}"
+
+    echo args: "${@}"
+    cmake -S "${source_dir}" -B "${build_dir}" "${@}"
+}

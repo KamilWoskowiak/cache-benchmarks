@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+
+set -o nounset
+set -o errexit
+set -o pipefail
+
+this_dir="$(dirname "$(realpath "${0}")")" || exit
+
+source "${this_dir}/.common.rc" || exit
+
+configure_args="-DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=1 -DCMAKE_INSTALL_PREFIX=${install_dir}"
+
+run_configure ${configure_args} "$@"

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+set -o nounset
+set -o errexit
+set -o pipefail
+
+this_dir="$(dirname "$(realpath "${0}")")" || exit
+
+source "${this_dir}/.common.rc" || exit
+
+configure_args="-DALCAMI_ENABLE_CLANG_TIDY=1"
+
+# create development build with analyzer checks enabled
+"${this_dir}/configure-develop" ${configure_args} "${@}"

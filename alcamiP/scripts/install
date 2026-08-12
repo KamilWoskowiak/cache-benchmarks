@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+
+set -o nounset
+set -o errexit
+set -o pipefail
+
+this_dir="$(dirname "$(realpath "${0}")")" || exit
+
+source "${this_dir}/.common.rc" || exit
+
+is_configured || exit 2
+
+cmake --install "${build_dir}" "${@}"

@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+
+set -o nounset
+set -o errexit
+set -o pipefail
+
+this_dir="$(dirname "$(realpath "${0}")")" || exit
+
+source "${this_dir}/.common.rc" || exit
+
+has_command grep || exit
+
+if (( ${#} != 0 )); then
+    echo "error: expected 0 arguments but given ${#}" >&2
+    exit 2
+fi
+
+count_iwyu_warnings() {
+    # written by iwyu when the tool emits a warning
+    local iwyu_warning_line="Warning: include-what-you-use reported diagnostics:"
+
+    # read from stdin
+    grep -c "${iwyu_warning_line}"
+}
+
+# expect iwyu output form stdin
+if [[ "$(count_iwyu_warnings)" == 0 ]]; then
+    echo "no iwyu warnings found"
+    exit 0
+else
+    echo "iwyu warnings reported"
+    exit 1
+fi

@@ -1,0 +1,25 @@
+/// \file
+///
+/// Build-time configuration settings for the ALCaMI library.
+
+#ifndef ALCAMI_CONFIG_CONFIG_H
+#define ALCAMI_CONFIG_CONFIG_H
+
+/// \addtogroup misc
+/// \{
+
+/// Version string.
+#define ALCAMI_VERSION "@PROJECT_VERSION@"
+
+/// Major version.
+#define ALCAMI_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+
+/// Minor version.
+#define ALCAMI_VERSION_MINOR @PROJECT_VERSION_MINOR@
+
+/// Patch version.
+#define ALCAMI_VERSION_PATCH @PROJECT_VERSION_PATCH@
+
+/// \}
+
+#endif // ALCAMI_CONFIG_CONFIG_H

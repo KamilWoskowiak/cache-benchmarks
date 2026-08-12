@@ -1,0 +1,392 @@
+# Author: Andrew J. Mikalsen
+# Date: 2024-12-03
+#
+# Dependencies:
+# - CodeCoverage.cmake (Optional)
+#     commit: 3f72179
+#     available: https://github.com/bilke/cmake-modules/blob/master/CodeCoverage.cmake
+#
+# Usage -- add the following to your CMakeLists.txt:
+#
+#   set(PROJECT_UTILS_VAR_PREFIX MY_PROJECT)
+#   set(PROJECT_UTILS_FUNC_PREFIX my_project)
+#   configure_file("${${PROJECT_NAME}_SOURCE_DIR}/cmake/ProjectUtils.cmake.in" "cmake/MyProjectUtils.cmake" @ONLY)
+#
+#   list(APPEND CMAKE_MODULE_PATH "${${PROJECT_NAME}_SOURCE_DIR}/cmake" "${${PROJECT_NAME}_BINARY_DIR}/cmake")
+#
+#   include(MyProjectUtils.cmake)
+#
+# Options are named MY_PROJECT_* and functions are named my_project_*.
+
+include(CheckCXXCompilerFlag)
+include(CheckLinkerFlag)
+
+option(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_SANITIZER_ADDRESS "Build with AddressSanitizer" OFF)
+option(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_SANITIZER_MEMORY "Build with MemorySanitizer" OFF)
+option(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_SANITIZER_UB "Build with UndefinedBehaviorSanitizer" OFF)
+option(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_SANITIZER_UB_AUXILIARY "Add additional checks that can cause false positives" OFF)
+option(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_SANITIZER_THREAD "Build with ThreadSanitizer" OFF)
+
+option(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_WARNINGS "Build with basic warnings enabled" OFF)
+option(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_WARNINGS_AUXILIARY "Build with additional warnings" OFF)
+option(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_WARNINGS_PERF "Build with performance-based warnings" OFF)
+option(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
+
+option(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_CPPCHECK "Run cppcheck during compilation" OFF)
+option(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_CLANG_TIDY "Run clang-tidy during compilation" OFF)
+option(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_IWYU "Run iwyu during compilation" OFF)
+option(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_LWYU "Enable CMake's link-what-you-use" OFF)
+option(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_COVERAGE "Build with code coverage enabled" OFF)
+
+set(@PROJECT_UTILS_VAR_PREFIX@_CPPCHECK_OPTIONS "" CACHE STRING "List of options for cppcheck")
+set(@PROJECT_UTILS_VAR_PREFIX@_CLANG_TIDY_OPTIONS "" CACHE STRING "List of options for clang-tidy")
+set(@PROJECT_UTILS_VAR_PREFIX@_IWYU_OPTIONS "-Xiwyu" "--cxx17ns" CACHE STRING "List of options for iwyu")
+
+if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_COVERAGE)
+  include(CodeCoverage OPTIONAL RESULT_VARIABLE @PROJECT_UTILS_VAR_PREFIX@_HAVE_MOD_CODE_COVERAGE)
+  if(NOT @PROJECT_UTILS_VAR_PREFIX@_HAVE_MOD_CODE_COVERAGE)
+    message(STATUS "Module CodeCoverage not found. Code coverage functionality will be unavailable.")
+  endif()
+endif()
+
+# Verify that analyzers have options set. (With none set they will not check anything.)
+if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_CPPCHECK AND (@PROJECT_UTILS_VAR_PREFIX@_CPPCHECK_OPTIONS STREQUAL ""))
+  message(WARNING "@PROJECT_UTILS_VAR_PREFIX@_ENABLE_CPPCHECK is set but @PROJECT_UTILS_VAR_PREFIX@_CPPCHECK_OPTIONS is empty")
+endif()
+
+if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_CLANG_TIDY AND (@PROJECT_UTILS_VAR_PREFIX@_CLANG_TIDY_OPTIONS STREQUAL ""))
+  message(WARNING "@PROJECT_UTILS_VAR_PREFIX@_ENABLE_CLANG_TIDY is set but @PROJECT_UTILS_VAR_PREFIX@_CLANG_TIDY_OPTIONS is empty")
+endif()
+
+if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_IWYU AND (@PROJECT_UTILS_VAR_PREFIX@_IWYU_OPTIONS STREQUAL ""))
+  message(WARNING "@PROJECT_UTILS_VAR_PREFIX@_ENABLE_IYWU is set but @PROJECT_UTILS_VAR_PREFIX@_IWYU_OPTIONS is empty")
+endif()
+
+if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_CPPCHECK)
+  find_program(@PROJECT_UTILS_VAR_PREFIX@_CPPCHECK_PATH cppcheck REQUIRED)
+endif()
+
+if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_CLANG_TIDY)
+  find_program(@PROJECT_UTILS_VAR_PREFIX@_CLANG_TIDY_PATH clang-tidy REQUIRED)
+endif()
+
+if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_IWYU)
+  find_program(@PROJECT_UTILS_VAR_PREFIX@_IWYU_PATH NAMES iwyu include-what-you-use REQUIRED)
+endif()
+
+# Basic warning flags (both GCC and Clang).
+check_cxx_compiler_flag("-Wall" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_ALL)
+check_cxx_compiler_flag("-Wextra" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_EXTRA)
+check_cxx_compiler_flag("-Wpedantic" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_PEDANTIC)
+
+# Auxiliary warning flags (both GCC and Clang).
+check_cxx_compiler_flag("-Wnull-dereference" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_NULL_DEREFERENCE)
+check_cxx_compiler_flag("-Wunused" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_UNUSED)
+check_cxx_compiler_flag("-Wuninitialized" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_UNINITIALIZED)
+check_cxx_compiler_flag("-Wfloat-equal" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_FLOAT_EQUAL)
+check_cxx_compiler_flag("-Wshadow" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_SHADOW)
+check_cxx_compiler_flag("-Wcast-qual" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_CAST_QUAL)
+check_cxx_compiler_flag("-Wcast-align" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_CAST_ALIGN)
+check_cxx_compiler_flag("-Wconversion" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_CONVERSION)
+check_cxx_compiler_flag("-Wsign-conversion" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_SIGN_CONVERSION)
+check_cxx_compiler_flag("-Wzero-as-null-pointer-constant" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_ZERO_AS_NULL_POINTER_CONSTANT)
+check_cxx_compiler_flag("-Wold-style-cast" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_OLD_STYLE_CAST)
+check_cxx_compiler_flag("-Wsuggest-override" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_SUGGEST_OVERRIDE)
+check_cxx_compiler_flag("-Wnon-virtual-dtor" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_NON_VIRTUAL_DTOR)
+
+# Clang-specific auxiliary warning flags.
+check_cxx_compiler_flag("-Wshadow-all" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_SHADOW_ALL)
+# checked to turn OFF this option for clang, i.e,. use -Wno-shadow-uncaptured-local
+check_cxx_compiler_flag("-Wshadow-uncaptured-local" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_NO_SHADOW_UNCAPTURED_LOCAL)
+
+# GCC-specific auxiliary warning flags.
+check_cxx_compiler_flag("-Warith-coversion" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_ARITH_CONVERSION)
+check_cxx_compiler_flag("-Wcast-align=strict" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_CAST_ALIGN_STRICT)
+
+# Clang-specific performance warning flags.
+check_cxx_compiler_flag("-Wperf-constraint-implies-noexcept" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_PERF_CONSTRAINT_IMPLIES_NOEXCEPT)
+
+# GCC-specific performance warning flags.
+check_cxx_compiler_flag("-Wnoexcept" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_NOEXCEPT)
+
+# Sanitizer flags. For flags needed by both the linker and compiler, we check for the linker flags.
+check_cxx_compiler_flag("-fno-omit-frame-pointer" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_NO_OMIT_FRAME_POINTER)
+check_linker_flag(CXX "-fsanitize=address" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_ADDRESS)
+check_linker_flag(CXX "-fsanitize=memory" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_MEMORY)
+check_linker_flag(CXX "-fsanitize=undefined" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_UNDEFINED)
+check_linker_flag(CXX "-fsanitize=thread" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_THREAD)
+
+# Provide warnings for missing flags. The build may still work, but will likely have unintended behavior.
+if((@PROJECT_UTILS_VAR_PREFIX@_ENABLE_SANITIZER_ADDRESS
+    OR @PROJECT_UTILS_VAR_PREFIX@_ENABLE_SANITIZER_MEMORY
+    OR @PROJECT_UTILS_VAR_PREFIX@_ENABLE_SANITIZER_UB
+    OR @PROJECT_UTILS_VAR_PREFIX@_ENABLE_SANITIZER_THREAD
+   )
+   AND (NOT @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_NO_OMIT_FRAME_POINTER))
+    message(WARNING "Compiler is missing flag -fno-omit-frame-pointer")
+endif()
+
+if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_SANITIZER_ADDRESS AND (NOT @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_ADDRESS))
+  message(WARNING "Linker is missing flag -fsanitize=address")
+endif()
+
+if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_SANITIZER_MEMORY AND (NOT @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_NO_OMIT_FRAME_POINTER))
+  message(WARNING "Linker is missing flag -fsanitize=memory")
+endif()
+
+if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_SANITIZER_THREAD AND (NOT @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_THREAD))
+  message(WARNING "Linker is missing flag -fsanitize=thread")
+endif()
+
+# Additional UndefinedBehaviorSanitizer flags
+check_linker_flag(CXX "-fsanitize=float-divide-by-zero" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_FLOAT_DIVIDE_BY_ZERO)
+check_linker_flag(CXX "-fsanitize=implicit-conversion" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_IMPLICIT_CONVERSION)
+check_linker_flag(CXX "-fsanitize=local-bounds" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_LOCAL_BOUNDS)
+check_linker_flag(CXX "-fsanitize=nullability" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_NULLABILITY)
+
+if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_SANITIZER_UB)
+  if(NOT
+     (@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_UNDEFINED
+      OR @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_FLOAT_DIVIDE_BY_ZERO
+      OR @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_IMPLICIT_CONVERSION
+      OR @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_LOCAL_BOUNDS
+      OR @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_NULLABILITY))
+    message(WARNING "Some UndefinedBehaviorSanitizer flags are missing")
+  endif()
+
+  if(NOT @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_UNDEFINED)
+    message(WARNING "Linker is missing flag -fsanitize=undefined")
+  endif()
+endif()
+
+# Flags for UndefinedBehaviorSanitizer that are technically defined but usually incorrect
+check_linker_flag(CXX "-fsanitize=unsigned-integer-overflow" @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_UNSIGNED_INTEGER_OVERFLOW)
+
+if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_SANITIZER_UB_AUXILIARY AND (NOT @PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_UNSIGNED_INTEGER_OVERFLOW))
+  message(WARNING "Linker is missing flag -fsanitize=unsigned-integer-overflow")
+endif()
+
+function(@PROJECT_UTILS_FUNC_PREFIX@_target_configure_compiler TARGET)
+  target_compile_features(${TARGET} PUBLIC cxx_std_20)
+  set_target_properties(${TARGET} PROPERTIES CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+
+  if(@PROJECT_UTILS_VAR_PREFIX@_LINK_WHAT_YOU_USE)
+    set_target_properties(${TARGET} PROPERTIES LINK_WHAT_YOU_USE ON)
+  endif()
+endfunction()
+
+function(@PROJECT_UTILS_FUNC_PREFIX@_target_configure_cppcheck TARGET)
+  if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_CPPCHECK)
+    set(CPPCHECK ${@PROJECT_UTILS_VAR_PREFIX@_CPPCHECK_PATH} ${@PROJECT_UTILS_VAR_PREFIX@_CPPCHECK_OPTIONS})
+    set_target_properties(${TARGET} PROPERTIES CXX_CPPCHECK "${CPPCHECK}")
+  endif()
+endfunction()
+
+function(@PROJECT_UTILS_FUNC_PREFIX@_target_configure_clangtidy TARGET)
+  if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_CLANG_TIDY)
+    set(CLANG_TIDY ${@PROJECT_UTILS_VAR_PREFIX@_CLANG_TIDY_PATH} ${@PROJECT_UTILS_VAR_PREFIX@_CLANG_TIDY_OPTIONS})
+    set_target_properties(${TARGET} PROPERTIES CXX_CLANG_TIDY "${CLANG_TIDY}")
+  endif()
+endfunction()
+
+function(@PROJECT_UTILS_FUNC_PREFIX@_target_configure_iwyu TARGET)
+  if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_IWYU)
+    set(IWYU ${@PROJECT_UTILS_VAR_PREFIX@_IWYU_PATH} ${@PROJECT_UTILS_VAR_PREFIX@_IWYU_OPTIONS})
+    set_target_properties(${TARGET} PROPERTIES CXX_INCLUDE_WHAT_YOU_USE "${IWYU}")
+  endif()
+endfunction()
+
+function(@PROJECT_UTILS_FUNC_PREFIX@_target_configure_sanitizers TARGET)
+  if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_SANITIZER_ADDRESS)
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_NO_OMIT_FRAME_POINTER)
+      target_compile_options(${TARGET} PUBLIC "-fno-omit-frame-pointer")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_ADDRESS)
+      target_compile_options(${TARGET} PUBLIC "-fsanitize=address")
+      target_link_options(${TARGET} PUBLIC "-fsanitize=address")
+    endif()
+  endif()
+
+  if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_SANITIZER_MEMORY)
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_NO_OMIT_FRAME_POINTER)
+      target_compile_options(${TARGET} PUBLIC "-fno-omit-frame-pointer")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_MEMORY)
+      target_compile_options(${TARGET} PUBLIC "-fsanitize=memory")
+      target_link_options(${TARGET} PUBLIC "-fsanitize=memory")
+    endif()
+  endif()
+
+  if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_SANITIZER_UB)
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_NO_OMIT_FRAME_POINTER)
+      target_compile_options(${TARGET} PUBLIC "-fno-omit-frame-pointer")
+      target_link_options(${TARGET} PUBLIC "-fno-omit-frame-pointer")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_UNDEFINED)
+      target_compile_options(${TARGET} PUBLIC "-fsanitize=undefined")
+      target_link_options(${TARGET} PUBLIC "-fsanitize=undefined")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_FLOAT_DIVIDE_BY_ZERO)
+      target_compile_options(${TARGET} PUBLIC "-fsanitize=float-divide-by-zero")
+      target_link_options(${TARGET} PUBLIC "-fsanitize=float-divide-by-zero")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_IMPLICIT_CONVERSION)
+      target_compile_options(${TARGET} PUBLIC "-fsanitize=implicit-conversion")
+      target_link_options(${TARGET} PUBLIC "-fsanitize=implicit-conversion")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_LOCAL_BOUNDS)
+      target_compile_options(${TARGET} PUBLIC "-fsanitize=local-bounds")
+      target_link_options(${TARGET} PUBLIC "-fsanitize=local-bounds")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_NULLABILITY)
+      target_compile_options(${TARGET} PUBLIC "-fsanitize=nullability")
+      target_link_options(${TARGET} PUBLIC "-fsanitize=nullability")
+    endif()
+  endif()
+
+  if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_SANITIZER_UB_AUXILIARY)
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_UNSIGNED_INTEGER_OVERFLOW)
+      target_compile_options(${TARGET} PUBLIC "-fsanitize=unsigned-integer-overflow")
+      target_link_options(${TARGET} PUBLIC "-fsanitize=unsigned-integer-overflow")
+    endif()
+  endif()
+
+  if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_SANITIZER_THREAD)
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_SAN_THREAD)
+      target_compile_options(${TARGET} PUBLIC "-fsanitize=thread")
+      target_link_options(${TARGET} PUBLIC "-fsanitize=thread")
+    endif()
+  endif()
+endfunction()
+
+function(@PROJECT_UTILS_FUNC_PREFIX@_target_configure_warnings TARGET)
+  if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_WARNINGS)
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_ALL)
+      target_compile_options(${TARGET} PRIVATE "-Wall")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_EXTRA)
+      target_compile_options(${TARGET} PRIVATE "-Wextra")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_PEDANTIC)
+      target_compile_options(${TARGET} PRIVATE "-Wpedantic")
+    endif()
+  endif()
+
+  if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_WARNINGS_AUXILIARY)
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_NULL_DEREFERENCE)
+      target_compile_options(${TARGET} PRIVATE "-Wnull-dereference")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_UNUSED)
+      target_compile_options(${TARGET} PRIVATE "-Wunused")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_UNINITIALIZED)
+      target_compile_options(${TARGET} PRIVATE "-Wuninitialized")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_FLOAT_EQUAL)
+      target_compile_options(${TARGET} PRIVATE "-Wfloat-equal")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_SHADOW)
+      target_compile_options(${TARGET} PRIVATE "-Wshadow")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_CAST_QUAL)
+      target_compile_options(${TARGET} PRIVATE "-Wcast-qual")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_CAST_ALIGN)
+      target_compile_options(${TARGET} PRIVATE "-Wcast-align")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_CONVERSION)
+      target_compile_options(${TARGET} PRIVATE "-Wconversion")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_SIGN_CONVERSION)
+      target_compile_options(${TARGET} PRIVATE "-Wsign-conversion")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_ZERO_AS_NULL_POINTER_CONSTANT)
+      target_compile_options(${TARGET} PRIVATE "-Wzero-as-null-pointer-constant")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_OLD_STYLE_CAST)
+      target_compile_options(${TARGET} PRIVATE "-Wold-style-cast")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_SUGGEST_OVERRIDE)
+      target_compile_options(${TARGET} PRIVATE "-Wsuggest-override")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_NON_VIRTUAL_DTOR)
+      target_compile_options(${TARGET} PRIVATE "-Wnon-virtual-dtor")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_SHADOW_ALL)
+      target_compile_options(${TARGET} PRIVATE "-Wshadow-all")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_NO_SHADOW_UNCAPTURED_LOCAL)
+      target_compile_options(${TARGET} PRIVATE "-Wno-shadow-uncaptured-local")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_ARITH_CONVERSION)
+      target_compile_options(${TARGET} PRIVATE "-Warith-conversion")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_CAST_ALIGN_STRICT)
+      target_compile_options(${TARGET} PRIVATE "-Wcast-align=strict")
+    endif()
+  endif()
+  if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_WARNINGS_PERF)
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_PERF_CONSTRAINT_IMPLIES_NOEXCEPT)
+      target_compile_options(${TARGET} PRIVATE "-Wperf-constraint-implies-noexcept")
+    endif()
+
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_FLAG_WARN_NOEXCEPT)
+      target_compile_options(${TARGET} PRIVATE "-Wnoexcept")
+    endif()
+  endif()
+endfunction()
+
+function(@PROJECT_UTILS_FUNC_PREFIX@_target_configure_coverage TARGET)
+  if(@PROJECT_UTILS_VAR_PREFIX@_ENABLE_COVERAGE)
+    if(@PROJECT_UTILS_VAR_PREFIX@_HAVE_MOD_CODE_COVERAGE)
+      append_coverage_compiler_flags_to_target(${TARGET})
+    else()
+      message(WARNING "Code coverage is not available.")
+    endif()
+  endif()
+endfunction()
+
+function(@PROJECT_UTILS_FUNC_PREFIX@_target_configure_all TARGET)
+  cmake_language(CALL @PROJECT_UTILS_FUNC_PREFIX@_target_configure_compiler ${TARGET})
+  cmake_language(CALL @PROJECT_UTILS_FUNC_PREFIX@_target_configure_cppcheck ${TARGET})
+  cmake_language(CALL @PROJECT_UTILS_FUNC_PREFIX@_target_configure_clangtidy ${TARGET})
+  cmake_language(CALL @PROJECT_UTILS_FUNC_PREFIX@_target_configure_iwyu ${TARGET})
+  cmake_language(CALL @PROJECT_UTILS_FUNC_PREFIX@_target_configure_sanitizers ${TARGET})
+  cmake_language(CALL @PROJECT_UTILS_FUNC_PREFIX@_target_configure_warnings ${TARGET})
+  cmake_language(CALL @PROJECT_UTILS_FUNC_PREFIX@_target_configure_coverage ${TARGET})
+endfunction()
+
+function(@PROJECT_UTILS_FUNC_PREFIX@_make_excluded_content_available NAME)
+  # Equivalent to FetchContent_MakeAvailable but without installing. Newer versions of FetchContent_MakeAvailable
+  # support this directly, but this function is provided for compatibility with older CMake versions.
+  # See: https://stackoverflow.com/a/65529161
+  if(NOT ${NAME}_POPULATED)
+    FetchContent_Populate(${NAME})
+    add_subdirectory(${${NAME}_SOURCE_DIR} ${${NAME}_BINARY_DIR} EXCLUDE_FROM_ALL)
+  endif()
+endfunction()
