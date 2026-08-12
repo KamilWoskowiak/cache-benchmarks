@@ -234,9 +234,20 @@ auto main(int argc, char** argv) -> int {
       "m,mapping_sleep_us", "Sleep duration inside mapping on cache miss, in microseconds",
       cxxopts::value<uint64_t>()->default_value("0"))(
       "mapping_spin_us", "Busy-spin duration inside mapping on cache miss, in microseconds",
-      cxxopts::value<uint64_t>()->default_value("0"))(
-      "labeled", "Print labeled output instead of CSV",
-      cxxopts::value<bool>()->default_value("true")->implicit_value("false"));
+      cxxopts::value<uint64_t>()->default_value("0"))
+
+      //
+      // Alcami cache_options
+      //
+      ("append_log_capacity", "Append log capacity", cxxopts::value<std::size_t>()->default_value("64"))(
+          "append_log_buffer_count", "Number of append log buffers", cxxopts::value<std::size_t>()->default_value("8"))(
+          "shard_power", "Cache shard power; shard count = 2^shard_power",
+          cxxopts::value<std::size_t>()->default_value("0"))("evictions_per_cycle",
+                                                             "Number of evictions per eviction cycle",
+                                                             cxxopts::value<std::size_t>()->default_value("8"))
+
+          ("labeled", "Print labeled output instead of CSV",
+           cxxopts::value<bool>()->default_value("true")->implicit_value("false"));
 
   auto result = options.parse(argc, argv);
 
@@ -267,8 +278,21 @@ auto main(int argc, char** argv) -> int {
 
   const auto mapping_spin_us = result["mapping_spin_us"].as<uint64_t>();
 
+  //
+  // Alcami cache options.
+  //
+  const std::size_t append_log_capacity = result["append_log_capacity"].as<std::size_t>();
+
+  const std::size_t append_log_buffer_count = result["append_log_buffer_count"].as<std::size_t>();
+
+  const std::size_t shard_power = result["shard_power"].as<std::size_t>();
+
+  const std::size_t evictions_per_cycle = result["evictions_per_cycle"].as<std::size_t>();
+
   if (mapping_sleep_us > 0 && mapping_spin_us > 0) {
-    spdlog::error("set at most one of mapping_sleep_us or mapping_spin_us");
+    spdlog::error("set at most one of "
+                  "mapping_sleep_us or "
+                  "mapping_spin_us");
     return 1;
   }
 
@@ -287,7 +311,8 @@ auto main(int argc, char** argv) -> int {
   } else if (distribution == "z") {
     distribution_mode = distribution_generator::mode_t::zipfian;
   } else {
-    spdlog::error("distribution must be one of: e, u, or z");
+    spdlog::error("distribution must be one of: "
+                  "e, u, or z");
     return 1;
   }
 
@@ -313,32 +338,66 @@ auto main(int argc, char** argv) -> int {
   }
 
   if (distribution_mode == distribution_generator::mode_t::exponential && !(lambda > 0.0 && std::isfinite(lambda))) {
-    spdlog::error("lambda must be a finite positive number");
+    spdlog::error("lambda must be a finite "
+                  "positive number");
     return 1;
   }
 
   if (distribution_mode == distribution_generator::mode_t::zipfian &&
       !(theta > 0.0 && theta < 1.0 && std::isfinite(theta))) {
-    spdlog::error("theta must be a finite number with 0 < theta < 1");
+    spdlog::error("theta must be a finite number "
+                  "with 0 < theta < 1");
     return 1;
   }
 
   if (warmup == 0) {
-    spdlog::error("warmup must be > 0 (or omit --warmup to default to cache_size)");
+    spdlog::error("warmup must be > 0 "
+                  "(or omit --warmup to default "
+                  "to cache_size)");
+    return 1;
+  }
+
+  //
+  // cache_manager calculates:
+  //
+  //   shard_count = 1 << shard_power
+  //
+  // Avoid an invalid shift.
+  //
+  if (shard_power >= std::numeric_limits<std::size_t>::digits) {
+    spdlog::error("shard_power must be less than {}", std::numeric_limits<std::size_t>::digits);
+    return 1;
+  }
+
+  const std::size_t shard_count = std::size_t{1} << shard_power;
+
+  //
+  // A shard count larger than cache_size
+  // would result in shards with zero capacity.
+  //
+  if (shard_count > cache_size) {
+    spdlog::error("shard count ({}) must not exceed "
+                  "cache_size ({})",
+                  shard_count, cache_size);
     return 1;
   }
 
   /*
    * Cache miss mapping.
    *
-   * `out` is the page storage owned by the cache entry.
+   * `out` is the page storage owned by the
+   * cache entry.
    *
-   * We fill all 16 KiB so the memory is actually materialized/touched.
-   * A key-derived value is used instead of zero so each page has
-   * deterministic content associated with its key.
+   * We fill all 16 KiB so the memory is
+   * actually materialized/touched.
+   * A key-derived value is used instead of
+   * zero so each page has deterministic
+   * content associated with its key.
    *
-   * No shared_ptr is involved. Alcami's lookup handle is responsible
-   * for keeping the cache entry valid while it is being accessed.
+   * No shared_ptr is involved. Alcami's
+   * lookup handle is responsible for keeping
+   * the cache entry valid while it is being
+   * accessed.
    */
   auto mapping = [](key_t in, value_t& out) -> std::optional<std::error_code> {
     maybe_delay_mapping();
@@ -351,7 +410,7 @@ auto main(int argc, char** argv) -> int {
   };
 
   /*
-   * cache_size is now a count of 16 KiB pages.
+   * cache_size is a count of 16 KiB pages.
    *
    * Examples:
    *
@@ -361,7 +420,15 @@ auto main(int argc, char** argv) -> int {
    *   cache_size = 10,000
    *       => ~156.25 MiB page payload
    */
-  auto cache = alc::make_cache<key_t, value_t>(cache_size, mapping, alc::policies::lru);
+
+  alc::cache_options cache_options{
+      .append_log_capacity = append_log_capacity,
+      .append_log_buffer_count = append_log_buffer_count,
+      .shard_power = shard_power,
+      .evictions_per_cycle = evictions_per_cycle,
+  };
+
+  auto cache = alc::make_cache<key_t, value_t>(cache_size, mapping, alc::policies::lru, cache_options);
 
   const std::size_t warmup_keys = std::min(warmup, total_keys);
 
@@ -374,16 +441,17 @@ auto main(int argc, char** argv) -> int {
   for (key_t k = 0; k < static_cast<key_t>(warmup_keys); k++) {
     /*
      * The returned Alcami handle protects the
-     * cached 16 KiB page for the lifetime of `h`.
+     * cached 16 KiB page for the lifetime of
+     * `h`.
      */
     auto h = cache.lookup(k);
     (void)h;
   }
 
   /*
-   * Generate all requested keys before the timed
-   * region so RNG cost is not included in the
-   * cache benchmark.
+   * Generate all requested keys before the
+   * timed region so RNG cost is not included
+   * in the cache benchmark.
    */
   std::vector<std::vector<key_t>> keys(threads_count);
 
@@ -480,6 +548,16 @@ auto main(int argc, char** argv) -> int {
 
               << ",\nmapping_spin_us=" << mapping_spin_us
 
+              << ",\nappend_log_capacity=" << append_log_capacity
+
+              << ",\nappend_log_buffer_count=" << append_log_buffer_count
+
+              << ",\nshard_power=" << shard_power
+
+              << ",\nshard_count=" << shard_count
+
+              << ",\nevictions_per_cycle=" << evictions_per_cycle
+
               << ",\nsecs=" << secs
 
               << ",\nmops=" << m_ops
@@ -494,8 +572,9 @@ auto main(int argc, char** argv) -> int {
   } else {
     std::cout << ops_per_thread << ',' << threads_count << ',' << cache_size << ',' << total_keys << ',' << distribution
               << ',' << lambda << ',' << theta << ',' << warmup_keys << ',' << mapping_sleep_us << ','
-              << mapping_spin_us << ',' << secs << ',' << m_ops << ',' << ns_per_op << ','
-              << warmup_misses.load(std::memory_order_relaxed) << ',' << cache.hit_percent() << '\n';
+              << mapping_spin_us << ',' << append_log_capacity << ',' << append_log_buffer_count << ',' << shard_power
+              << ',' << shard_count << ',' << evictions_per_cycle << ',' << secs << ',' << m_ops << ',' << ns_per_op
+              << ',' << warmup_misses.load(std::memory_order_relaxed) << ',' << cache.hit_percent() << '\n';
   }
 
   return 0;
