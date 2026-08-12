@@ -23,7 +23,7 @@ DISTRIBUTION="z"
 THETA=0.95
 
 # Number of repetitions per configuration.
-REPEATS=5
+REPEATS=2
 
 # Working-set sizes to test.
 TOTAL_KEYS=(
