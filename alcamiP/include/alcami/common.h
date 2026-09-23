@@ -81,6 +81,15 @@ using blank_summarizer_t = std::remove_const_t<decltype(blank_summarizer<K>)>;
 static_assert(priority<common_priority_t>);
 static_assert(summary<common_summary>);
 
+// TODO: move this elsewhere
+/// Template parameter to enable statistics.
+///
+/// Enabling statistics impacts performance
+struct statistics {};
+
+template <typename T>
+concept statistics_mode = std::same_as<T, void> || std::same_as<T, statistics>;
+
 } // namespace alc
 
 
