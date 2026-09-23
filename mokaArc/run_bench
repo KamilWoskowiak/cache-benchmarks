@@ -19,7 +19,7 @@ DISTRIBUTION="z"
 
 THETAS=(
   0.95
-  0.8
+  0.75
 )
 
 REPEATS=2
