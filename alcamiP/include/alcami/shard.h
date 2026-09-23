@@ -10,10 +10,12 @@
 #include <atomic>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <iterator>
 #include <memory>
 #include <new>
 #include <optional>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -26,6 +28,7 @@
 
 #include <gtl/phmap.hpp>
 
+#include "alcami/common.h"
 #include "append_log.h"
 #include "gtl/phmap_fwd_decl.hpp"
 #include "mapping.h"
@@ -33,6 +36,7 @@
 #include "summary.h"
 
 namespace alc {
+
 /// Type that can store the maximum capacity of a `alc::cache_manager`.
 using cache_size_t = std::size_t;
 
@@ -108,7 +112,7 @@ public:
 private:
   /// Grants the owning `cache_manager` access to the private constructor so it alone can mint handles.
   template <searchable K_, storable V_, mapping<K_, V_> Map_, eviction_policy Pol_,
-            summarizer<K_, typename Pol_::summary_type> Summ_>
+            summarizer<K_, typename Pol_::summary_type> Summ_, statistics_mode Stats_>
   friend class shard;
 
   /// Creates a handle from non-owning pointers to a cache slot and its reference counter.
@@ -133,7 +137,7 @@ private:
 ///
 /// \see `alc::policy`
 template <searchable K, storable V, mapping<K, V> Map, eviction_policy Pol,
-          summarizer<K, typename Pol::summary_type> Summ>
+          summarizer<K, typename Pol::summary_type> Summ, statistics_mode Stats = void>
 class shard {
 public:
   /// Type of the key used to look up values.
@@ -174,20 +178,47 @@ public:
         size_type append_log_capacity, size_type append_log_buffer_count, size_type eviction_batch_size)
       : capacity_{capacity}, invalid_index_{capacity + 1}, mapping_{mapping}, summarizer_{summarizer}, policy_{pol},
         entry_values_(capacity), entry_ref_counts_(capacity), entry_metadata_(capacity),
-        entry_occupied_(capacity, false), heap_(heap_compare{&entry_metadata_}), entry_heap_handles_(capacity),
-        entry_heap_prio_stale(capacity, false), access_log_(append_log_buffer_count, append_log_capacity),
-        eviction_batch_size_(eviction_batch_size) {
+        entry_occupied_(capacity, false), access_log_(append_log_buffer_count, append_log_capacity),
+        eviction_batch_size_(eviction_batch_size), heap_(heap_compare{&entry_metadata_}), entry_heap_handles_(capacity),
+        entry_heap_prio_stale(capacity, false) {
+    resident_.reserve(capacity_);
+
     dirty_slots_stack_.reserve(capacity_);
     deferred_slots_.reserve(capacity_);
+
     for (std::size_t slot = 0; slot < capacity_; ++slot) {
       entry_metadata_[slot].key = key_type{};
       entry_metadata_[slot].priority = policy_.identity;
 
       entry_ref_counts_[slot].value.store(0, std::memory_order_relaxed);
-
       entry_heap_handles_[slot].handle = heap_.push(slot);
     }
   }
+
+  shard(const shard&) = delete;
+  auto operator=(const shard&) -> shard& = delete;
+
+  shard(shard&& other)
+      : capacity_{other.capacity_}, invalid_index_{other.invalid_index_}, mapping_{std::move(other.mapping_)},
+        summarizer_{std::move(other.summarizer_)}, policy_{std::move(other.policy_)},
+        resident_{std::move(other.resident_)}, entry_values_{std::move(other.entry_values_)},
+        entry_ref_counts_{std::move(other.entry_ref_counts_)}, entry_metadata_{std::move(other.entry_metadata_)},
+        entry_occupied_{std::move(other.entry_occupied_)}, access_log_{std::move(other.access_log_)},
+        clock_{other.clock_}, eviction_batch_size_{other.eviction_batch_size_}, heap_{heap_compare{&entry_metadata_}},
+        entry_heap_handles_(capacity_), entry_heap_prio_stale{std::move(other.entry_heap_prio_stale)},
+        dirty_slots_stack_{std::move(other.dirty_slots_stack_)}, deferred_slots_{std::move(other.deferred_slots_)},
+        lookup_count_{other.lookup_count_.load(std::memory_order_relaxed)},
+        hit_count_{other.hit_count_.load(std::memory_order_relaxed)} {
+    assert(other.misses_.empty());
+    assert(other.waiters_.load(std::memory_order_relaxed) == 0);
+    assert(!other.drain_active_.load(std::memory_order_relaxed));
+
+    m_rebuild_after_move_(other);
+  }
+
+  auto operator=(shard&&) -> shard& = delete;
+
+  ~shard() noexcept = default;
 
   /// Returns the number of slots in the cache. This is the maximum number of handles that may reference distinct keys.
   [[nodiscard]]
@@ -205,7 +236,6 @@ public:
     }
 
     const std::size_t hits = hit_count_.load(std::memory_order_relaxed);
-
     /// Narrows, but okay because we are okay with being lossy (probably wont happen)
     return (100.0 * gsl::narrow_cast<double>(hits)) / gsl::narrow_cast<double>(lookups);
   }
@@ -219,67 +249,94 @@ public:
   ///
   /// \see `capacity()`
   [[nodiscard]]
-  auto lookup(key_type key) const -> std::optional<handle_type> {
-    // lookup_count_.fetch_add(1, std::memory_order_relaxed);
+  auto lookup(const key_type& key) const -> std::optional<handle_type> {
+    if constexpr (statistics_enabled) {
+      lookup_count_.fetch_add(1, std::memory_order_relaxed);
+    }
 
-    while (true) {
-      std::size_t slot{invalid_index_};
-      std::shared_ptr<key_latch> latch;
-      auto new_latch = std::make_shared<key_latch>();
+    std::size_t slot = invalid_index_;
 
-      const bool inserted = key_to_index_.lazy_emplace_l(
-          key,
-          [this, &slot, &latch](index_map_type::value_type& kv) {
-            slot = kv.second.first;
+    const bool found = resident_.if_contains(key, [this, &slot](const typename resident_map_type::value_type& kv) {
+      slot = kv.second;
+      entry_ref_counts_[slot].value.fetch_add(1, std::memory_order_relaxed);
+    });
 
-            if (slot == invalid_index_) {
-              latch = kv.second.second;
-            } else {
-            }
-          },
-          [&key, &new_latch, this](const auto& ctor) {
-            ctor(std::piecewise_construct, std::forward_as_tuple(key),
-                 std::forward_as_tuple(invalid_index_, std::move(new_latch)));
+    if (found) [[likely]] {
+      if constexpr (statistics_enabled) {
+        hit_count_.fetch_add(1, std::memory_order_relaxed);
+      }
+
+      return m_make_pinned_handle_(slot);
+    }
+
+    miss_entry* miss = nullptr;
+    bool owns_miss = false;
+
+    {
+      oneapi::tbb::spin_mutex::scoped_lock miss_lock(miss_mutex_);
+
+      slot = invalid_index_;
+
+      const bool became_resident =
+          resident_.if_contains(key, [this, &slot](const typename resident_map_type::value_type& kv) {
+            slot = kv.second;
+            entry_ref_counts_[slot].value.fetch_add(1, std::memory_order_relaxed);
           });
-      if (inserted) {
-        break;
+
+      if (became_resident) {
+        miss_lock.release();
+
+        if constexpr (statistics_enabled) {
+          hit_count_.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        return m_make_pinned_handle_(slot);
       }
 
-      if (slot != invalid_index_) {
-        return m_make_handle_(slot);
+      auto miss_it = misses_.find(key);
+
+      if (miss_it == misses_.end()) {
+        auto [it, inserted] = misses_.try_emplace(key);
+        assert(inserted);
+
+        miss = &it->second;
+        owns_miss = true;
+      } else {
+        miss = &miss_it->second;
+
+        const miss_status status = miss->status.load(std::memory_order_acquire);
+
+        if (status == miss_status::loading) {
+          ++miss->waiters;
+        } else if (status == miss_status::failed) {
+          return std::nullopt;
+        } else {
+          assert(false);
+          return std::nullopt;
+        }
       }
-
-      m_wait_load_(latch);
     }
 
-    waiters_.fetch_add(1, std::memory_order_acq_rel);
-
-    m_produce_slots_();
-
-    value_type loaded_value{};
-
-    auto error = mapping_(key, loaded_value);
-
-    if (error.has_value()) {
-      m_fail_load_(key);
-      // TODO: we need a way to return std::error to the user
-      return std::nullopt;
+    if (!owns_miss) {
+      return m_wait_for_miss_(key, miss);
     }
 
-    std::size_t free_slot{invalid_index_};
-    free_slots_.pop(free_slot);
-
-    if (free_slot == invalid_index_) {
-      m_fail_load_(key);
-      return std::nullopt;
-    }
-
-    return m_fill_slot_(key, free_slot, std::move(loaded_value));
+    return m_load_miss_(key, miss);
   }
 
 private:
+  static constexpr bool statistics_enabled = std::same_as<Stats, statistics>;
+  static constexpr std::size_t num_submap_pow = 8;
+
   /// Branching factor used by the eviction heap.
   static constexpr std::size_t heap_arity = 4;
+
+  /// Object for lookups waiting for a in-progress entry.
+  enum class miss_status : std::uint8_t {
+    loading,
+    ready,
+    failed,
+  };
 
   /// Metadata stored for each cache slot.
   struct metadata {
@@ -296,9 +353,28 @@ private:
     const std::vector<metadata>* entries_metadata;
   };
 
-  /// Object for lookups waiting for a in-progress entry.
-  struct key_latch {
-    std::atomic<bool> is_ready{false};
+  struct miss_entry {
+    std::atomic<miss_status> status{miss_status::loading};
+    std::size_t slot{};
+    std::size_t waiters{};
+  };
+
+  struct hasher {
+    template <typename T>
+    auto operator()(const T& key) const -> std::size_t {
+      if constexpr (std::integral<T>) {
+        return gsl::narrow_cast<std::size_t>(rapidhash(&key, sizeof(key)));
+
+      } else if constexpr (std::same_as<T, std::string> || std::same_as<T, std::string_view>) {
+
+        std::string_view view{key};
+
+        return gsl::narrow_cast<std::size_t>(rapidhash(view.data(), view.size()));
+
+      } else {
+        return std::hash<T>{}(key);
+      }
+    }
   };
 
   /// Ref count storage for one cache slot. Keeps neighboring counters off the same cache line.
@@ -307,12 +383,14 @@ private:
   };
 
   /// Index and optional latch stored for each key. The latch is populated while the index is invalid.
-  using index_entry_type = std::pair<std::size_t, std::shared_ptr<key_latch>>;
-
   /// Map from key to its slot and, while loading, the latch shared by waiting lookups.
-  using index_map_type = gtl::parallel_flat_hash_map<
-      key_type, index_entry_type, gtl::priv::hash_default_hash<key_type>, gtl::priv::hash_default_eq<key_type>,
-      gtl::priv::Allocator<std::pair<const key_type, index_entry_type>>, 8, oneapi::tbb::spin_rw_mutex>;
+  using resident_map_type =
+      gtl::parallel_flat_hash_map<key_type, std::size_t, hasher, gtl::priv::hash_default_eq<key_type>,
+                                  gtl::priv::Allocator<std::pair<const key_type, std::size_t>>, num_submap_pow,
+                                  oneapi::tbb::spin_rw_mutex>;
+
+  using miss_map_type = gtl::node_hash_map<key_type, miss_entry, gtl::priv::hash_default_hash<key_type>,
+                                           gtl::priv::hash_default_eq<key_type>>;
 
   /// Lock-free log of recently accessed slots.
   using log_type = append_log<std::size_t>;
@@ -344,7 +422,10 @@ private:
   policy_type policy_{};
 
   /// Maps each cached key to its slot and in-progress-load latch.
-  mutable index_map_type key_to_index_;
+  mutable resident_map_type resident_;
+
+  mutable oneapi::tbb::spin_mutex miss_mutex_;
+  mutable miss_map_type misses_;
 
   /// Cached values, indexed by slot. Hot on successful lookups.
   alignas(std::hardware_destructive_interference_size) mutable std::vector<value_type> entry_values_;
@@ -404,44 +485,100 @@ private:
   /// Total cache hits.
   alignas(std::hardware_destructive_interference_size) mutable std::atomic<std::size_t> hit_count_{0};
 
+  [[no_unique_address]]
+  hasher hash_{};
+
+  static auto m_spin_pause_() noexcept -> void {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+    __asm__ __volatile__("yield");
+#else
+    std::this_thread::yield();
+#endif
+  }
+
   /// Waits for the owner of an invalid-index entry to finish, then lets the caller retry the map lookup.
-  auto m_wait_load_(const std::shared_ptr<key_latch>& latch) const -> void {
-    assert(latch);
-    latch->is_ready.wait(false, std::memory_order_acquire);
+  [[nodiscard]]
+  auto m_wait_for_miss_(const key_type& key, miss_entry* miss) const -> std::optional<handle_type> {
+    assert(miss != nullptr);
+
+    while (miss->status.load(std::memory_order_relaxed) == miss_status::loading) {
+      m_spin_pause_();
+    }
+
+    const miss_status status = miss->status.load(std::memory_order_acquire);
+    std::size_t slot = invalid_index_;
+
+    if (status == miss_status::ready) {
+      slot = miss->slot;
+    }
+
+    {
+      oneapi::tbb::spin_mutex::scoped_lock lock(miss_mutex_);
+
+      assert(miss->waiters > 0);
+      --miss->waiters;
+
+      if (miss->waiters == 0) {
+        const auto it = misses_.find(key);
+        assert(it != misses_.end());
+        assert(&it->second == miss);
+        misses_.erase(it);
+      }
+    }
+
+    if (status != miss_status::ready) {
+      return std::nullopt;
+    }
+
+    return m_make_pinned_handle_(slot);
+  }
+
+  [[nodiscard]]
+  auto m_load_miss_(const key_type& key, miss_entry* miss) const -> std::optional<handle_type> {
+    assert(miss != nullptr);
+
+    waiters_.fetch_add(1, std::memory_order_acq_rel);
+    m_produce_slots_();
+
+    value_type loaded_value{};
+    auto error = mapping_(key, loaded_value);
+
+    if (error.has_value()) {
+      m_fail_miss_(key, miss);
+      // TODO: we need a way to return std::error to the user
+      return std::nullopt;
+    }
+
+    std::size_t free_slot{invalid_index_};
+    free_slots_.pop(free_slot);
+
+    if (free_slot == invalid_index_) {
+      m_fail_miss_(key, miss);
+      return std::nullopt;
+    }
+
+    return m_fill_miss_(key, free_slot, std::move(loaded_value), miss);
   }
 
   /// Publishes a loaded slot or clears a failed load. Wakes every waiter holding the entry's shared latch.
-  auto m_finish_load_(const key_type& key, std::size_t slot, bool slot_is_valid) const -> void {
-    std::shared_ptr<key_latch> latch;
-
-    if (slot_is_valid) {
-      key_to_index_.modify_if(key, [&](index_map_type::value_type& kv) {
-        assert(kv.second.first == invalid_index_);
-        latch = std::move(kv.second.second);
-        kv.second.first = slot;
-      });
-    } else {
-      key_to_index_.erase_if(key, [&](const index_map_type::value_type& kv) {
-        if (kv.second.first != invalid_index_) {
-          return false;
-        }
-
-        latch = kv.second.second;
-        return true;
-      });
-    }
-
-    assert(latch);
-    if (!latch) {
-      return;
-    }
-
-    latch->is_ready.store(true, std::memory_order_release);
-    latch->is_ready.notify_all();
-  }
-
   /// Cancels a failed load and clears its invalid-index entry.
-  auto m_fail_load_(const key_type& key) const -> void { m_finish_load_(key, invalid_index_, false); }
+  auto m_fail_miss_(const key_type& key, miss_entry* miss) const -> void {
+    oneapi::tbb::spin_mutex::scoped_lock lock(miss_mutex_);
+
+    assert(miss != nullptr);
+    assert(miss->status.load(std::memory_order_relaxed) == miss_status::loading);
+
+    miss->status.store(miss_status::failed, std::memory_order_release);
+
+    if (miss->waiters == 0) {
+      const auto it = misses_.find(key);
+      assert(it != misses_.end());
+      assert(&it->second == miss);
+      misses_.erase(it);
+    }
+  }
 
   /// Produces reusable slots for waiting misses.
   auto m_produce_slots_() const -> void {
@@ -454,7 +591,6 @@ private:
     }
 
     const std::size_t batch = std::min(pending, eviction_batch_size_);
-
     waiters_.fetch_sub(batch, std::memory_order_acq_rel);
 
     m_drain_heap_();
@@ -466,57 +602,72 @@ private:
 
   /// Logs a hit and returns a handle for an already-pinned slot.
   [[nodiscard]]
-  auto m_make_handle_(std::size_t slot) const -> std::optional<handle_type> {
-    access_log_.merge_with(slot,
-                           [this](log_type::iterator begin, log_type::iterator end) { m_merge_accesses_(begin, end); });
+  auto m_make_pinned_handle_(std::size_t slot) const -> std::optional<handle_type> {
+    (void)access_log_.merge_with(
+        slot, [this](log_type::iterator begin, log_type::iterator end) { m_merge_accesses_(begin, end); });
 
     return handle_type{&entry_values_[slot], &entry_ref_counts_[slot].value};
   }
 
   /// Stores a loaded value in a slot and returns a handle.
   [[nodiscard]]
-  auto m_fill_slot_(const key_type& key, std::size_t slot, value_type value) const -> std::optional<handle_type> {
-
+  auto m_fill_miss_(const key_type& key, std::size_t slot, value_type value, miss_entry* miss) const
+      -> std::optional<handle_type> {
     metadata& entry = entry_metadata_[slot];
 
     entry.key = key;
     entry.priority = policy_.identity;
-
     entry_values_[slot] = std::move(value);
 
     {
       oneapi::tbb::spin_mutex::scoped_lock lock(evict_mutex_);
-
       entry_occupied_[slot] = true;
       deferred_slots_.push_back(slot);
     }
 
-    m_finish_load_(key, slot, true);
+    {
+      oneapi::tbb::spin_mutex::scoped_lock miss_lock(miss_mutex_);
 
-    return m_make_handle_(slot);
+      assert(miss != nullptr);
+      assert(miss->status.load(std::memory_order_relaxed) == miss_status::loading);
+      assert(entry_ref_counts_[slot].value.load(std::memory_order_relaxed) == 0);
+
+      entry_ref_counts_[slot].value.store(miss->waiters + 1, std::memory_order_relaxed);
+
+      const bool inserted = resident_.lazy_emplace_l(
+          key, [slot](typename resident_map_type::value_type& kv) { assert(kv.second == slot); },
+          [&key, slot](const auto& ctor) { ctor(key, slot); });
+
+      assert(inserted);
+
+      miss->slot = slot;
+      miss->status.store(miss_status::ready, std::memory_order_release);
+
+      if (miss->waiters == 0) {
+        const auto miss_it = misses_.find(key);
+        assert(miss_it != misses_.end());
+        assert(&miss_it->second == miss);
+        misses_.erase(miss_it);
+      }
+    }
+
+    return m_make_pinned_handle_(slot);
   }
 
   /// Iterates through access log and updates slot priorities.
   auto m_merge_accesses_(typename log_type::iterator begin, typename log_type::iterator end) const -> void {
-    std::vector<std::size_t> slots;
-
-    for (auto it = begin; it != end; ++it) {
-      slots.push_back(*it);
-    }
-
-    if (slots.empty()) {
+    if (begin == end) {
       return;
     }
 
     oneapi::tbb::spin_mutex::scoped_lock lock(log_mutex_);
 
-    for (const std::size_t slot : slots) {
+    for (auto it = begin; it != end; ++it) {
+      const std::size_t slot = *it;
       metadata& entry = entry_metadata_[slot];
-      entry_ref_counts_[slot].value.fetch_add(1, std::memory_order_relaxed);
 
       summary_type summary = summarizer_(entry.key);
       priority_type access_prio = policy_.prioritizer(clock_++, summary);
-
       entry.priority = policy_.combiner(entry.priority, access_prio);
 
       if (!entry_heap_prio_stale[slot]) {
@@ -528,7 +679,8 @@ private:
 
   /// Drains access records and refreshes the heap.
   auto m_drain_heap_() const -> void {
-    access_log_.drain([this](log_type::iterator begin, log_type::iterator end) { m_merge_accesses_(begin, end); });
+    (void)access_log_.drain(
+        [this](log_type::iterator begin, log_type::iterator end) { m_merge_accesses_(begin, end); });
 
     oneapi::tbb::spin_mutex::scoped_lock lock(log_mutex_);
 
@@ -570,16 +722,15 @@ private:
         return slot;
       }
 
-      auto can_evict = [&](const index_map_type::value_type& kv) {
-        return kv.second.first == slot && entry_ref_counts_[slot].value.load(std::memory_order_acquire) == 0;
-      };
+      const bool erased =
+          resident_.erase_if(slot_entry.key, [this, slot](const typename resident_map_type::value_type& kv) {
+            return kv.second == slot && entry_ref_counts_[slot].value.load(std::memory_order_acquire) == 0;
+          });
 
-      if (key_to_index_.erase_if(slot_entry.key, can_evict)) {
+      if (erased) {
         entry_occupied_[slot] = false;
-
         slot_entry.key = key_type{};
         slot_entry.priority = policy_.identity;
-
         return slot;
       }
 
@@ -587,6 +738,34 @@ private:
     }
 
     return invalid_index_;
+  }
+
+  auto m_rebuild_after_move_(shard& other) -> void {
+    std::vector<bool> excluded(capacity_, false);
+
+    for (const std::size_t slot : deferred_slots_) {
+      if (slot < capacity_) {
+        excluded[slot] = true;
+      }
+    }
+
+    std::size_t slot = invalid_index_;
+    while (other.free_slots_.try_pop(slot)) {
+      free_slots_.push(slot);
+
+      if (slot < capacity_) {
+        excluded[slot] = true;
+      }
+    }
+
+    std::fill(entry_heap_prio_stale.begin(), entry_heap_prio_stale.end(), false);
+    dirty_slots_stack_.clear();
+
+    for (std::size_t i = 0; i < capacity_; ++i) {
+      if (!excluded[i]) {
+        entry_heap_handles_[i].handle = heap_.push(i);
+      }
+    }
   }
 };
 

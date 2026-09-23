@@ -7,13 +7,14 @@
 #define ALCAMI_INCLUDE_CACHE_H
 
 #include <cstddef>
-#include <memory>
+#include <gsl/util>
 #include <optional>
-#include <utility>
 
 #include <gtl/phmap.hpp>
 
+#include "alcami/rapidhash.h"
 #include "common.h"
+#include "options.h"
 #include "shard.h"
 
 namespace alc {
@@ -56,15 +57,8 @@ namespace alc {
 ///
 /// \{
 
-struct cache_options {
-  size_t append_log_capacity{64};
-  size_t append_log_buffer_count{8};
-  size_t shard_power{0};
-  size_t evictions_per_cycle{8};
-};
-
 template <searchable K, storable V, mapping<K, V> Map, eviction_policy Pol,
-          summarizer<K, typename Pol::summary_type> Summ>
+          summarizer<K, typename Pol::summary_type> Summ, statistics_mode Stats = void>
 class cache_manager {
 public:
   /// Type of the key used to look up values.
@@ -92,43 +86,29 @@ public:
   using handle_type = cache_handle<value_type>;
 
   /// Type used to denote a single shard of the cache
-  using shard_type = shard<K, V, Map, Pol, Summ>;
+  using shard_type = shard<K, V, Map, Pol, Summ, Stats>;
 
   cache_manager(size_type capacity, mapping_type mapping, policy_type pol, summarizer_type summarizer = {},
                 cache_options options = {})
-      : capacity_{capacity}, shard_count_{size_type{1} << options.shard_power}, shard_mask_{shard_count_ - 1},
-        shards_{std::allocator_traits<shard_allocator_type>::allocate(shard_allocator_, shard_count_)} {
-    size_type base_capacity = capacity_ / shard_count_;
-    size_type remainder = capacity_ % shard_count_;
+      : capacity_{capacity}, options_{options} {
 
-    for (size_t constructed{0}; constructed < shard_count_; ++constructed) {
-      const size_type shard_capacity = base_capacity + (constructed < remainder ? 1 : 0);
-      std::allocator_traits<shard_allocator_type>::construct(
-          shard_allocator_, shards_ + constructed, shard_capacity, mapping, pol, summarizer,
-          options.append_log_capacity, options.append_log_buffer_count, options.evictions_per_cycle);
+    shards_.reserve(m_shard_count_());
+
+    for (std::size_t i = 0; i < m_shard_count_(); ++i) {
+      shards_.emplace_back(capacity_, mapping, pol, summarizer, options_.append_log_capacity,
+                           options_.append_log_buffer_count, options_.evictions_per_cycle);
     }
   }
 
   cache_manager(const cache_manager&) = delete;
+
   auto operator=(const cache_manager&) -> cache_manager& = delete;
 
-  cache_manager(cache_manager&& other) noexcept
-      : capacity_{std::exchange(other.capacity_, 0)}, shard_count_{std::exchange(other.shard_count_, 0)},
-        shard_mask_{std::exchange(other.shard_mask_, 0)}, shards_{std::exchange(other.shards_, nullptr)} {}
+  cache_manager(cache_manager&&) noexcept = default;
 
-  auto operator=(cache_manager&& other) noexcept -> cache_manager& {
-    if (this != &other) {
-      m_destroy_shards_();
-      capacity_ = std::exchange(other.capacity_, 0);
-      shard_count_ = std::exchange(other.shard_count_, 0);
-      shard_mask_ = std::exchange(other.shard_mask_, 0);
-      shards_ = std::exchange(other.shards_, nullptr);
-    }
+  auto operator=(cache_manager&&) noexcept -> cache_manager& = default;
 
-    return *this;
-  }
-
-  ~cache_manager() noexcept { m_destroy_shards_(); }
+  ~cache_manager() noexcept = default;
 
   [[nodiscard]]
   auto capacity() const noexcept -> size_type {
@@ -137,46 +117,80 @@ public:
 
   [[nodiscard]]
   auto hit_percent() const noexcept -> double {
-    double hit_percent = 0.0;
+    if constexpr (!statistics_enabled) {
+      return 0.0;
+    } else {
+      double total = 0.0;
 
-    for (size_type i = 0; i < shard_count_; ++i) {
-      hit_percent += shards_[i].hit_percent();
+      for (auto& shard : shards_) {
+        total += shard.hit_percent();
+      }
+
+      return total / gsl::narrow_cast<double>(shards_.size());
     }
-
-    return hit_percent / static_cast<double>(shard_count_);
   }
 
   [[nodiscard]]
+  auto average_drain_size() const noexcept -> double {
+    if constexpr (!statistics_enabled) {
+      return 0.0;
+    } else {
+      double total = 0.0;
+
+      for (auto& shard : shards_) {
+        total += shard.average_drain_size();
+      }
+
+      return total / gsl::narrow_cast<double>(shards_.size());
+    }
+  }
+
+  /// Returns a **lifetime-constrained** reference to the data that the mapping associates with the given key.
+  ///
+  /// The data referenced by the returned handle lives only as long as the handle, and the handle lives only as long
+  /// as this object.
+  ///
+  /// Returns no value if all slots in the cache are being accessed.
+  ///
+  /// \see `capacity()`
+  [[nodiscard]]
   auto lookup(key_type key) const -> std::optional<handle_type> {
-    const std::size_t hash = gtl::priv::hash_default_hash<key_type>{}(key);
-    return shards_[hash & shard_mask_].lookup(key);
+    const std::size_t hash = hash_(key);
+    size_t index = hash & (m_shard_count_() - 1);
+    return shards_[index].lookup(key);
   }
 
 private:
-  using shard_allocator_type = std::allocator<shard_type>;
+  static constexpr bool statistics_enabled = std::same_as<Stats, statistics>;
 
-  auto m_destroy_shards_() noexcept -> void {
-    if (!shards_) {
-      return;
+  struct hasher {
+    template <typename T>
+    auto operator()(const T& key) const -> std::size_t {
+      if constexpr (std::integral<T>) {
+        return gsl::narrow_cast<std::size_t>(rapidhash(&key, sizeof(key)));
+
+      } else if constexpr (std::same_as<T, std::string> || std::same_as<T, std::string_view>) {
+
+        std::string_view view{key};
+
+        return gsl::narrow_cast<std::size_t>(rapidhash(view.data(), view.size()));
+
+      } else {
+        return std::hash<T>{}(key);
+      }
     }
+  };
 
-    for (size_type i = shard_count_; i != 0; --i) {
-      std::allocator_traits<shard_allocator_type>::destroy(shard_allocator_, shards_ + i - 1);
-    }
-
-    std::allocator_traits<shard_allocator_type>::deallocate(shard_allocator_, shards_, shard_count_);
-    shards_ = nullptr;
-    shard_count_ = 0;
-    shard_mask_ = 0;
-    capacity_ = 0;
+  [[nodiscard]]
+  auto m_shard_count_() const noexcept -> std::size_t {
+    return std::size_t{1} << options_.shard_power;
   }
 
-  size_type capacity_{};
-  size_type shard_count_{};
-  size_type shard_mask_{};
+  std::vector<shard_type> shards_{};
   [[no_unique_address]]
-  shard_allocator_type shard_allocator_{};
-  shard_type* shards_{};
+  hasher hash_{};
+  size_type capacity_{};
+  cache_options options_{};
 };
 
 
@@ -185,20 +199,20 @@ namespace detail {
 ///
 /// We implement `alc::make_cache` as a _niebloid_, which allows us to take K and V while deducing the other template
 /// parameters.
-template <searchable K, storable V>
+template <searchable K, storable V, statistics_mode Stats = void>
 class make_cache_impl {
 public:
   template <mapping<K, V> Map, eviction_policy Pol,
             summarizer<K, typename Pol::summary_type> Summ = blank_summarizer_t<K>>
   [[nodiscard]]
   auto operator()(cache_size_t capacity, Map mapping, Pol pol, Summ summarizer = {}, cache_options options = {}) const {
-    return cache_manager<K, V, Map, Pol, Summ>{capacity, mapping, pol, summarizer, options};
+    return cache_manager<K, V, Map, Pol, Summ, Stats>{capacity, mapping, pol, summarizer, options};
   }
 
   template <mapping<K, V> Map, eviction_policy Pol>
   [[nodiscard]]
   auto operator()(cache_size_t capacity, Map mapping, Pol pol, cache_options options) const {
-    return cache_manager<K, V, Map, Pol, blank_summarizer_t<K>>{capacity, mapping, pol, {}, options};
+    return cache_manager<K, V, Map, Pol, blank_summarizer_t<K>, Stats>{capacity, mapping, pol, {}, options};
   }
 };
 } // namespace detail
