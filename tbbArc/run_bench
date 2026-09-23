@@ -6,8 +6,6 @@ OUTPUT="tbb_results.csv"
 BINARY="./cache_bench_tbb"
 
 THREAD_COUNTS=(
-  8
-  26
   52
 )
 
