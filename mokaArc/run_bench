@@ -4,11 +4,7 @@ set -euo pipefail
 
 OUTPUT="moka_results.csv"
 
-THREAD_COUNTS=(
-  8
-  26
-  52
-)
+THREADS=52
 
 MAPPING_SLEEP_US=(
   0
@@ -20,12 +16,14 @@ MAPPING_SLEEP_US=(
 OPS=1000000
 CACHE_SIZE=10000
 DISTRIBUTION="z"
-THETA=0.95
 
-# Number of repetitions per configuration.
+THETAS=(
+  0.95
+  0.8
+)
+
 REPEATS=2
 
-# Working-set sizes to test.
 TOTAL_KEYS=(
   10000
   12500
@@ -39,18 +37,19 @@ TOTAL_KEYS=(
 echo "Building release binary..."
 cargo build --release
 
-# CSV header
 echo "repeat,ops_per_thread,threads,cache_size,total_keys,distribution,lambda,theta,warmup,mapping_sleep_us,mapping_spin_us,secs,mops,ns_per_op,warmup_misses" >"$OUTPUT"
 
-for threads in "${THREAD_COUNTS[@]}"; do
+for theta in "${THETAS[@]}"; do
   for mapping_sleep_us in "${MAPPING_SLEEP_US[@]}"; do
     for total_keys in "${TOTAL_KEYS[@]}"; do
       echo
       echo "========================================"
-      echo "threads=$threads"
+      echo "threads=$THREADS"
       echo "mapping_sleep_us=$mapping_sleep_us"
       echo "total_keys=$total_keys"
       echo "cache_size=$CACHE_SIZE"
+      echo "distribution=$DISTRIBUTION"
+      echo "theta=$theta"
       echo "working_set_mib=$(awk "BEGIN { printf \"%.2f\", ($total_keys * 16384) / 1048576 }")"
       echo "========================================"
 
@@ -62,12 +61,12 @@ for threads in "${THREAD_COUNTS[@]}"; do
             --release \
             --quiet \
             -- \
-            --threads "$threads" \
+            --threads "$THREADS" \
             --ops "$OPS" \
             --cache_size "$CACHE_SIZE" \
             --total_keys "$total_keys" \
             --distribution "$DISTRIBUTION" \
-            --theta "$THETA" \
+            --theta "$theta" \
             --mapping_sleep_us "$mapping_sleep_us" \
             --labeled false \
             2>/dev/null
